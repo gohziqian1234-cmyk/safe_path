@@ -12,15 +12,13 @@ from streamlit_webrtc import webrtc_streamer
 
 from detection import LocalDetector
 from event_store import EventStore
+from rtc_config import build_rtc_configuration
 from risk_engine import DEFAULT_HAZARD_LABELS
 from web_monitor import BrowserMonitor, MonitorSnapshot
 
 
 APP_DIRECTORY = Path(__file__).parent
 EVENT_STORE = EventStore(APP_DIRECTORY / "outputs")
-RTC_CONFIGURATION = {
-    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
-}
 
 st.set_page_config(
     page_title="SafePath AI",
@@ -225,7 +223,7 @@ webrtc_context = webrtc_streamer(
     key="safepath-browser-camera",
     video_frame_callback=monitor.process_video_frame,
     media_stream_constraints={"video": True, "audio": False},
-    rtc_configuration=RTC_CONFIGURATION,
+    rtc_configuration=build_rtc_configuration(),
     async_processing=True,
 )
 
