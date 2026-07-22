@@ -78,7 +78,7 @@ safepath-ai/
 |-- voice_alert.py       Desktop-mode speech and cooldown
 |-- event_store.py       CSV and high-risk snapshot records
 |-- requirements.txt
-|-- packages.txt         Linux libGL dependency for Streamlit Cloud
+|-- packages.txt         Linux OpenCV libraries for Streamlit Cloud
 |-- models/              Put custom weights here later
 |-- videos/              Optional demo clips
 |-- outputs/             Runtime events and snapshots (not committed)
