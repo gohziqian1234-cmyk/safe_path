@@ -7,7 +7,8 @@ voice warning, and records the high-risk event.
 
 ## What works in this MVP
 
-- Browser webcam support locally and on Streamlit Community Cloud
+- Cloud-compatible browser webcam support on Streamlit Community Cloud
+- Optional low-latency WebRTC camera mode for localhost
 - Person and common-object detection using `yolo11n.pt`
 - Visible trapezoid walking/danger zone
 - Conservative `HIGH` risk rule: person in zone + hazard in zone
@@ -31,19 +32,21 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Then open `http://localhost:8501`, click **START** inside the camera panel, and
-allow camera access. Close Zoom or Teams first if another app is using the camera.
+Then open `http://localhost:8501`, switch on **Start monitoring**, and allow
+camera access. The cloud-compatible mode is selected by default. Select
+**Fast WebRTC (local/advanced)** in the sidebar for a higher frame rate on
+localhost. Close Zoom or Teams first if another app is using the camera.
 
 The first launch downloads `yolo11n.pt`. Later runs reuse the local model file.
 
 ## Use the public app
 
-Open the deployed Streamlit URL in Chrome or Edge, click **START**, and select
-**Allow** when the browser asks for camera permission. The hosted page uses HTTPS,
-which browsers require for webcam access.
-
-If the stream cannot connect on a restricted office or school network, try a
-normal home/mobile connection. Some restricted networks block WebRTC traffic.
+Open the deployed Streamlit URL in Chrome or Edge, keep
+**Cloud-compatible (recommended)** selected, switch on **Start monitoring**, and
+select **Allow** when the browser asks for camera permission. This mode sends
+about one frame per second through Streamlit's normal secure connection, avoiding
+the STUN/TURN connection required by WebRTC. Use WebRTC only for localhost or
+after configuring a reliable private TURN service.
 
 ## Test detection without Streamlit
 
@@ -71,7 +74,8 @@ The risk and monitor-state tests do not need a camera or downloaded AI weights.
 
 ```text
 safepath-ai/
-|-- app.py               Streamlit dashboard and browser WebRTC camera
+|-- app.py               Streamlit dashboard and camera-mode selection
+|-- camera_feed.py       Cloud-camera frame decoding
 |-- web_monitor.py       Thread-safe browser-frame processing and alerts
 |-- detection.py         YOLO adapter, annotations, and desktop camera mode
 |-- risk_engine.py       Pure danger-zone decision logic

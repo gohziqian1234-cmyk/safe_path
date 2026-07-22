@@ -8,8 +8,10 @@ from pathlib import Path
 import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
+from camera_input_live import camera_input_live
 from streamlit_webrtc import webrtc_streamer
 
+from camera_feed import decode_camera_frame
 from detection import LocalDetector
 from event_store import EventStore
 from rtc_config import build_rtc_configuration
@@ -124,9 +126,15 @@ def speak_in_browser(message: str) -> None:
 
 
 @st.fragment(run_every=0.5)
-def live_status(monitor: BrowserMonitor, webrtc_context, voice_enabled: bool) -> None:
+def live_status(
+    monitor: BrowserMonitor,
+    voice_enabled: bool,
+    playing: bool = False,
+    webrtc_context=None,
+) -> None:
     snapshot = monitor.snapshot()
-    playing = bool(webrtc_context.state.playing)
+    if webrtc_context is not None:
+        playing = bool(webrtc_context.state.playing)
 
     if snapshot.last_error:
         st.error(f"Detection error: {snapshot.last_error}")
@@ -164,6 +172,17 @@ st.caption("AI-powered preventive home-safety monitor using your browser camera"
 
 with st.sidebar:
     st.header("Monitoring settings")
+    camera_mode = st.selectbox(
+        "Camera connection",
+        options=(
+            "Cloud-compatible (recommended)",
+            "Fast WebRTC (local/advanced)",
+        ),
+        help=(
+            "Cloud-compatible mode works through Streamlit's normal HTTPS connection. "
+            "WebRTC is faster but some hosted connections require a dedicated TURN server."
+        ),
+    )
     model_name = st.text_input(
         "YOLO model",
         value="yolo11n.pt",
@@ -191,7 +210,7 @@ with st.sidebar:
 
 st.caption(
     "The first launch can take a minute while the small YOLO model loads. "
-    "Click START below, then choose **Allow** when your browser asks for camera access."
+    "Start monitoring below, then choose **Allow** when your browser asks for camera access."
 )
 
 if not selected_hazards:
@@ -219,15 +238,71 @@ monitor_key = (
 )
 monitor = get_monitor(detector, monitor_key, float(cooldown_seconds))
 
-webrtc_context = webrtc_streamer(
-    key="safepath-browser-camera",
-    video_frame_callback=monitor.process_video_frame,
-    media_stream_constraints={"video": True, "audio": False},
-    rtc_configuration=build_rtc_configuration(),
-    async_processing=True,
-)
+if camera_mode == "Cloud-compatible (recommended)":
+    st.subheader("Cloud-compatible live camera")
+    st.caption(
+        "Recommended for the public app. It analyzes about one frame per second over "
+        "the app's secure connection and does not require STUN/TURN."
+    )
+    cloud_camera_active = st.toggle(
+        "Start monitoring",
+        key="cloud_camera_active",
+    )
 
-live_status(monitor, webrtc_context, voice_enabled)
+    if cloud_camera_active:
+        camera_image = camera_input_live(
+            debounce=1000,
+            height=480,
+            width=640,
+            key="safepath-cloud-camera",
+            show_controls=False,
+        )
+        if camera_image is None:
+            st.info("Starting the camera. Choose **Allow** if your browser asks for access.")
+        else:
+            try:
+                frame_digest, frame = decode_camera_frame(camera_image)
+                frame_key = (id(monitor), frame_digest)
+                if st.session_state.get("cloud_frame_key") != frame_key:
+                    st.session_state.cloud_annotated_frame = monitor.process_image(frame)
+                    st.session_state.cloud_frame_key = frame_key
+
+                annotated_frame = st.session_state.get("cloud_annotated_frame")
+                if annotated_frame is not None:
+                    st.image(
+                        annotated_frame,
+                        channels="BGR",
+                        caption="Live AI-analyzed camera frame",
+                        use_container_width=True,
+                    )
+            except Exception as error:
+                st.error(f"Could not process the browser camera frame: {error}")
+    else:
+        st.info("Switch on **Start monitoring** to open your camera.")
+
+    live_status(
+        monitor,
+        voice_enabled,
+        playing=cloud_camera_active,
+    )
+else:
+    st.subheader("Fast WebRTC camera")
+    st.caption(
+        "Best for localhost. The public app may need a private TURN relay for this mode."
+    )
+    webrtc_context = webrtc_streamer(
+        key="safepath-browser-camera",
+        video_frame_callback=monitor.process_video_frame,
+        media_stream_constraints={"video": True, "audio": False},
+        rtc_configuration=build_rtc_configuration(),
+        async_processing=True,
+    )
+
+    live_status(
+        monitor,
+        voice_enabled,
+        webrtc_context=webrtc_context,
+    )
 
 st.divider()
 st.caption(
