@@ -1,20 +1,26 @@
-"""Streamlit dashboard for the SafePath AI local safety monitor."""
+"""Streamlit dashboard for the SafePath AI browser-camera monitor."""
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pandas as pd
 import streamlit as st
+import streamlit.components.v1 as components
+from streamlit_webrtc import webrtc_streamer
 
-from detection import LocalDetector, open_camera
+from detection import LocalDetector
 from event_store import EventStore
 from risk_engine import DEFAULT_HAZARD_LABELS
-from voice_alert import VoiceAlert
+from web_monitor import BrowserMonitor, MonitorSnapshot
 
 
 APP_DIRECTORY = Path(__file__).parent
 EVENT_STORE = EventStore(APP_DIRECTORY / "outputs")
+RTC_CONFIGURATION = {
+    "iceServers": [{"urls": ["stun:stun.l.google.com:19302"]}]
+}
 
 st.set_page_config(
     page_title="SafePath AI",
@@ -53,55 +59,33 @@ def load_detector(
     )
 
 
-def initialize_state(cooldown_seconds: float, voice_enabled: bool) -> None:
-    defaults = {
-        "monitoring": False,
-        "camera": None,
-        "detector": None,
-        "latest_assessment": None,
-        "latest_warning_issued": False,
-    }
-    for key, value in defaults.items():
-        if key not in st.session_state:
-            st.session_state[key] = value
-
-    alert_settings = (cooldown_seconds, voice_enabled)
-    if st.session_state.get("alert_settings") != alert_settings:
-        previous_alert = st.session_state.get("voice_alert")
-        if previous_alert:
-            previous_alert.close()
-        st.session_state.voice_alert = VoiceAlert(
+def get_monitor(
+    detector: LocalDetector,
+    monitor_key: tuple[object, ...],
+    cooldown_seconds: float,
+) -> BrowserMonitor:
+    if st.session_state.get("monitor_key") != monitor_key:
+        st.session_state.browser_monitor = BrowserMonitor(
+            detector=detector,
+            event_store=EVENT_STORE,
             cooldown_seconds=cooldown_seconds,
-            enabled=voice_enabled,
         )
-        st.session_state.alert_settings = alert_settings
+        st.session_state.monitor_key = monitor_key
+    return st.session_state.browser_monitor
 
 
-def stop_monitoring() -> None:
-    camera = st.session_state.get("camera")
-    if camera is not None:
-        camera.release()
-    st.session_state.camera = None
-    st.session_state.monitoring = False
-
-
-def render_status(assessment, warning_issued: bool) -> None:
-    if assessment is None:
-        system_value = "Ready"
-        risk_value = "LOW"
-        person_value = "No"
-        hazard_value = "None"
-    else:
-        system_value = "Monitoring"
-        risk_value = assessment.risk_level
-        person_value = "Yes" if assessment.person_detected else "No"
-        hazard_value = assessment.latest_hazard
+def render_status(snapshot: MonitorSnapshot, playing: bool) -> None:
+    assessment = snapshot.assessment
+    system_value = "Monitoring" if playing else "Ready"
+    risk_value = assessment.risk_level if assessment else "LOW"
+    person_value = "Yes" if assessment and assessment.person_detected else "No"
+    hazard_value = assessment.latest_hazard if assessment else "None"
 
     st.metric("System", system_value)
     st.metric("Risk level", risk_value)
     st.metric("Person detected", person_value)
     st.metric("Latest hazard", hazard_value)
-    st.metric("Warning issued this frame", "Yes" if warning_issued else "No")
+    st.metric("Frames analyzed", snapshot.processed_frames)
 
 
 def render_events() -> None:
@@ -120,66 +104,72 @@ def render_events() -> None:
     )
 
 
-@st.fragment(run_every=0.20)
-def live_monitor() -> None:
-    camera = st.session_state.camera
-    detector = st.session_state.detector
-    success, frame = camera.read()
+def speak_in_browser(message: str) -> None:
+    """Use the visitor's browser speech engine instead of the cloud speaker."""
 
-    if not success:
-        st.error("The camera stopped returning frames. Stop monitoring and reconnect it.")
-        return
+    encoded_message = json.dumps(message)
+    components.html(
+        f"""
+        <script>
+        const message = {encoded_message};
+        if ("speechSynthesis" in window) {{
+            window.speechSynthesis.cancel();
+            const warning = new SpeechSynthesisUtterance(message);
+            warning.rate = 0.9;
+            warning.volume = 1.0;
+            window.speechSynthesis.speak(warning);
+        }}
+        </script>
+        """,
+        height=0,
+    )
 
-    annotated_frame, assessment = detector.process_frame(frame)
-    warning_issued = False
-    if assessment.risk_level == "HIGH":
-        warning_issued = st.session_state.voice_alert.trigger(
-            assessment.warning_message
-        )
-        if warning_issued:
-            EVENT_STORE.record(
-                assessment,
-                annotated_frame=annotated_frame,
-                warning_issued=True,
-            )
-            st.toast(assessment.warning_message, icon="⚠️")
 
-    st.session_state.latest_assessment = assessment
-    st.session_state.latest_warning_issued = warning_issued
+@st.fragment(run_every=0.5)
+def live_status(monitor: BrowserMonitor, webrtc_context, voice_enabled: bool) -> None:
+    snapshot = monitor.snapshot()
+    playing = bool(webrtc_context.state.playing)
 
-    video_column, status_column = st.columns([2.2, 1])
-    with video_column:
-        st.image(
-            annotated_frame,
-            channels="BGR",
-            use_container_width=True,
-            caption="Local processing — frames are not uploaded",
-        )
+    if snapshot.last_error:
+        st.error(f"Detection error: {snapshot.last_error}")
+    elif playing and snapshot.processed_frames == 0:
+        st.info("Camera connected. Waiting for the first AI-processed frame...")
+
+    status_column, explanation_column = st.columns([1, 2.2])
     with status_column:
-        render_status(assessment, warning_issued)
+        render_status(snapshot, playing)
+    with explanation_column:
+        st.markdown(
+            "The green trapezoid is the walking danger zone. A **HIGH** risk "
+            "event requires both a person and a configured hazard to have their "
+            "bottom-center points inside that zone."
+        )
+        if snapshot.assessment and snapshot.assessment.risk_level == "HIGH":
+            st.error(snapshot.assessment.warning_message, icon="⚠️")
+        elif playing:
+            st.success("Monitoring is active. No high-risk condition is detected.")
+        else:
+            st.info("Click **START** in the camera panel and allow camera access.")
+
+    warning_key = (id(monitor), snapshot.warning_sequence)
+    if snapshot.warning_sequence and st.session_state.get("last_warning_key") != warning_key:
+        st.session_state.last_warning_key = warning_key
+        st.toast(snapshot.warning_message, icon="⚠️")
+        if voice_enabled:
+            speak_in_browser(snapshot.warning_message)
 
     render_events()
 
 
 st.title("🛡️ SafePath AI")
-st.caption("AI-powered preventive home safety guardian — local laptop MVP")
+st.caption("AI-powered preventive home-safety monitor using your browser camera")
 
 with st.sidebar:
     st.header("Monitoring settings")
-    settings_disabled = st.session_state.get("monitoring", False)
-    camera_index = st.number_input(
-        "Camera index",
-        min_value=0,
-        max_value=10,
-        value=0,
-        step=1,
-        disabled=settings_disabled,
-    )
     model_name = st.text_input(
         "YOLO model",
         value="yolo11n.pt",
         help="Use models/cable.pt here after training a custom cable detector.",
-        disabled=settings_disabled,
     )
     confidence = st.slider(
         "Detection confidence",
@@ -187,86 +177,66 @@ with st.sidebar:
         max_value=0.90,
         value=0.40,
         step=0.05,
-        disabled=settings_disabled,
     )
     selected_hazards = st.multiselect(
         "Household hazard proxies",
         options=sorted(DEFAULT_HAZARD_LABELS),
         default=sorted(DEFAULT_HAZARD_LABELS),
-        disabled=settings_disabled,
     )
-    voice_enabled = st.toggle(
-        "Voice warnings",
-        value=True,
-        disabled=settings_disabled,
-    )
+    voice_enabled = st.toggle("Browser voice warnings", value=True)
     cooldown_seconds = st.slider(
         "Warning cooldown (seconds)",
         min_value=3,
         max_value=30,
         value=8,
-        disabled=settings_disabled,
     )
 
-initialize_state(float(cooldown_seconds), voice_enabled)
+st.caption(
+    "The first launch can take a minute while the small YOLO model loads. "
+    "Click START below, then choose **Allow** when your browser asks for camera access."
+)
 
-start_column, stop_column, note_column = st.columns([1, 1, 4])
-with start_column:
-    start_clicked = st.button(
-        "▶ Start monitoring",
-        type="primary",
-        use_container_width=True,
-        disabled=st.session_state.monitoring,
-    )
-with stop_column:
-    stop_clicked = st.button(
-        "■ Stop",
-        use_container_width=True,
-        disabled=not st.session_state.monitoring,
-    )
-with note_column:
-    st.caption(
-        "First launch downloads the small YOLO model. Allow camera access when prompted."
-    )
+if not selected_hazards:
+    st.error("Select at least one household hazard proxy in the sidebar.")
+    st.stop()
 
-if start_clicked:
-    if not selected_hazards:
-        st.error("Select at least one household hazard proxy.")
-    else:
-        try:
-            with st.spinner("Loading the local AI model and opening the camera…"):
-                st.session_state.detector = load_detector(
-                    model_name.strip() or "yolo11n.pt",
-                    float(confidence),
-                    tuple(sorted(selected_hazards)),
-                )
-                st.session_state.camera = open_camera(int(camera_index))
-            st.session_state.monitoring = True
-            st.rerun()
-        except Exception as error:
-            stop_monitoring()
-            st.error(f"SafePath could not start: {error}")
-
-if stop_clicked:
-    stop_monitoring()
-    st.rerun()
-
-if st.session_state.monitoring:
-    live_monitor()
-else:
-    feed_column, status_column = st.columns([2.2, 1])
-    with feed_column:
-        st.info("Press **Start monitoring** to open the webcam and begin local detection.")
-        st.markdown(
-            "The green trapezoid is the walking danger zone. A **HIGH** risk event "
-            "requires both a person and a configured hazard to have their bottom-center "
-            "point inside that zone."
+try:
+    with st.spinner("Loading the AI model..."):
+        normalized_model_name = model_name.strip() or "yolo11n.pt"
+        hazard_labels = tuple(sorted(selected_hazards))
+        detector = load_detector(
+            normalized_model_name,
+            float(confidence),
+            hazard_labels,
         )
-    with status_column:
-        render_status(st.session_state.latest_assessment, False)
-    render_events()
+except Exception as error:
+    st.error(f"SafePath could not load the AI model: {error}")
+    st.stop()
+
+monitor_key = (
+    normalized_model_name,
+    float(confidence),
+    hazard_labels,
+    float(cooldown_seconds),
+)
+monitor = get_monitor(detector, monitor_key, float(cooldown_seconds))
+
+webrtc_context = webrtc_streamer(
+    key="safepath-browser-camera",
+    video_frame_callback=monitor.process_video_frame,
+    media_stream_constraints={"video": True, "audio": False},
+    rtc_configuration=RTC_CONFIGURATION,
+    async_processing=True,
+)
+
+live_status(monitor, webrtc_context, voice_enabled)
 
 st.divider()
+st.caption(
+    "Privacy: live frames are processed by this Streamlit app and are not kept. "
+    "Only a high-risk event snapshot is stored temporarily; cloud storage resets "
+    "when the app restarts. This prototype is not a certified emergency-alert device."
+)
 st.caption(
     "MVP limitation: the pretrained model detects common object proxies such as bags, "
     "bottles, chairs, and suitcases. Reliable loose-cable and fall detection requires "

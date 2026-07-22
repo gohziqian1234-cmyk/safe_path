@@ -1,63 +1,53 @@
 # SafePath AI
 
-SafePath AI is a local-first laptop prototype for preventive home-safety monitoring.
-It uses a webcam and a small YOLO model to detect a person plus common household
-hazard proxies, checks whether both are inside a walking danger zone, speaks one
-warning, and records the event locally.
+SafePath AI is a browser-camera prototype for preventive home-safety monitoring.
+It uses a small YOLO model to detect a person plus common household hazard
+proxies, checks whether both are inside a walking danger zone, gives a browser
+voice warning, and records the high-risk event.
 
 ## What works in this MVP
 
-- Live webcam detection on the laptop
+- Browser webcam support locally and on Streamlit Community Cloud
 - Person and common-object detection using `yolo11n.pt`
 - Visible trapezoid walking/danger zone
 - Conservative `HIGH` risk rule: person in zone + hazard in zone
-- Non-blocking voice warning with an 8-second default cooldown
-- Streamlit dashboard with live status
-- Local CSV event history and annotated snapshots
-- Standalone OpenCV mode for testing the AI before the dashboard
+- Browser voice warnings with an 8-second default cooldown
+- Live Streamlit status and temporary event history
+- Standalone OpenCV mode for testing the AI on a Windows laptop
 
 The default hazard proxies are backpack, bottle, chair, handbag, sports ball, and
 suitcase. A pretrained general-purpose model is **not** a reliable cable or fall
 detector. Use `models/cable.pt` only after training and validating a custom model.
 
-## Windows setup
+## Run locally on Windows
 
-Python 3.11 is recommended. In PowerShell, open this project folder and run:
+Python 3.11 or newer is recommended. In PowerShell, open this project folder and
+run:
 
 ```powershell
 py -3.11 -m venv .venv
-.\.venv\Scripts\Activate.ps1
-python -m pip install --upgrade pip
-pip install -r requirements.txt
-```
-
-If PowerShell blocks activation, use the virtual-environment Python directly:
-
-```powershell
+.\.venv\Scripts\python.exe -m pip install --upgrade pip
 .\.venv\Scripts\python.exe -m pip install -r requirements.txt
+.\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-## Run the complete dashboard
-
-On this prepared laptop, double-click `start_safepath.bat`. You can also run:
-
-```powershell
-.\.venv\Scripts\streamlit.exe run app.py
-```
-
-Then:
-
-1. Allow camera access for desktop apps in Windows privacy settings if asked.
-2. Press **Start monitoring**.
-3. Stand in the visible walking zone with a backpack, bottle, or suitcase.
-4. Confirm that the risk changes to `HIGH`, one voice warning plays, and an event
-   appears in the table.
-5. Press **Stop** before closing the browser tab.
+Then open `http://localhost:8501`, click **START** inside the camera panel, and
+allow camera access. Close Zoom or Teams first if another app is using the camera.
 
 The first launch downloads `yolo11n.pt`. Later runs reuse the local model file.
-If the camera cannot open, close Zoom/Teams or change the camera index to `1`.
+
+## Use the public app
+
+Open the deployed Streamlit URL in Chrome or Edge, click **START**, and select
+**Allow** when the browser asks for camera permission. The hosted page uses HTTPS,
+which browsers require for webcam access.
+
+If the stream cannot connect on a restricted office or school network, try a
+normal home/mobile connection. Some restricted networks block WebRTC traffic.
 
 ## Test detection without Streamlit
+
+The standalone Windows camera mode is still available:
 
 ```powershell
 .\.venv\Scripts\python.exe detection.py
@@ -69,45 +59,37 @@ Press `Q` in the camera window to stop. Useful options:
 python detection.py --camera 1 --confidence 0.50 --no-voice
 ```
 
-Test the speaker separately:
-
-```powershell
-python voice_alert.py
-```
-
-If Windows speech synthesis is unavailable, SafePath uses the native Windows
-warning beep and prints the speech error in the terminal.
-
-## Run the automated risk tests
+## Run the automated tests
 
 ```powershell
 python -m unittest discover -s tests -v
 ```
 
-These tests do not need a camera or downloaded AI weights.
+The risk and monitor-state tests do not need a camera or downloaded AI weights.
 
 ## Project structure
 
 ```text
 safepath-ai/
-├── app.py               Streamlit dashboard and live monitoring loop
-├── detection.py         YOLO adapter, annotations, and desktop camera mode
-├── risk_engine.py       Pure danger-zone decision logic
-├── voice_alert.py       Non-blocking speech and cooldown
-├── event_store.py       Local CSV and snapshot records
-├── requirements.txt
-├── models/              Put custom weights here later
-├── videos/              Optional demo clips
-├── outputs/             Runtime events and snapshots (not committed)
-└── tests/
+|-- app.py               Streamlit dashboard and browser WebRTC camera
+|-- web_monitor.py       Thread-safe browser-frame processing and alerts
+|-- detection.py         YOLO adapter, annotations, and desktop camera mode
+|-- risk_engine.py       Pure danger-zone decision logic
+|-- voice_alert.py       Desktop-mode speech and cooldown
+|-- event_store.py       CSV and high-risk snapshot records
+|-- requirements.txt
+|-- packages.txt         Linux libGL dependency for Streamlit Cloud
+|-- models/              Put custom weights here later
+|-- videos/              Optional demo clips
+|-- outputs/             Runtime events and snapshots (not committed)
+`-- tests/
 ```
 
 ## Demo claim to use
 
-> Our MVP uses local real-time object detection and spatial danger-zone analysis.
+> Our MVP uses real-time object detection and spatial danger-zone analysis.
 > Future versions will add a validated cable model, fall/pose analysis, and
 > trajectory prediction.
 
-This is a prototype, not a certified medical or emergency-alert device. Keep local
-CSV records during the MVP; Huawei Cloud synchronization can be added later once
-the team selects a service and supplies credentials.
+This is a prototype, not a certified medical or emergency-alert device. The
+hosted app's runtime records are temporary and reset when the cloud app restarts.

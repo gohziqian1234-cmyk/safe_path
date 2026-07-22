@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import threading
 from pathlib import Path
 from typing import Iterable
 
@@ -36,6 +37,7 @@ class LocalDetector:
         self.confidence = confidence
         self.risk_engine = RiskEngine(hazard_labels)
         self.model = YOLO(model_path)
+        self._prediction_lock = threading.Lock()
         self.target_class_ids = self._find_target_class_ids()
 
         if not self.target_class_ids:
@@ -58,12 +60,15 @@ class LocalDetector:
     def process_frame(self, frame):
         """Return the annotated frame and its structured risk assessment."""
 
-        results = self.model.predict(
-            source=frame,
-            classes=self.target_class_ids,
-            conf=self.confidence,
-            verbose=False,
-        )
+        # Streamlit caches this model across sessions. Serialize inference so
+        # simultaneous browser streams do not mutate the same YOLO object.
+        with self._prediction_lock:
+            results = self.model.predict(
+                source=frame,
+                classes=self.target_class_ids,
+                conf=self.confidence,
+                verbose=False,
+            )
         detections = self._parse_detections(results[0])
         frame_height, frame_width = frame.shape[:2]
         assessment = self.risk_engine.assess(
