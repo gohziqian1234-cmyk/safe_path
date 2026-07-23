@@ -18,6 +18,7 @@ function sendStatus(status, extra = {}) {
     requestedFacingMode: state.requestedFacingMode,
     activeFacingMode: state.activeFacingMode,
     error: "",
+    capturedAtEpochMs: null,
     ...extra,
   });
 }
@@ -125,6 +126,7 @@ function captureFrame() {
 
   // JPEG is substantially smaller than the PNG used by camera_input_live.
   const image = canvas.toDataURL("image/jpeg", state.args.jpegQuality);
+  const capturedAtEpochMs = Date.now();
   state.waitingForServer = true;
   Streamlit.setComponentValue({
     status: "ready",
@@ -132,6 +134,7 @@ function captureFrame() {
     requestedFacingMode: state.requestedFacingMode,
     activeFacingMode: state.activeFacingMode,
     error: "",
+    capturedAtEpochMs,
   });
 }
 

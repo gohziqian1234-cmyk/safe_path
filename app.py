@@ -17,9 +17,15 @@ from camera_feed import decode_camera_frame
 from detection import LocalDetector, ModelRuntime
 from event_store import EventStore
 from risk_engine import DEFAULT_HAZARD_LABELS
-from rtc_config import build_rtc_configuration, has_turn_relay
+from rtc_config import (
+    build_rtc_configuration,
+    fetch_twilio_ice_servers,
+    has_turn_relay,
+    ice_url_schemes,
+)
 from safepath_camera import camera_capture
 from web_monitor import BrowserMonitor, MonitorSnapshot
+from webrtc_diagnostics import inspect_webrtc_context
 
 
 APP_DIRECTORY = Path(__file__).parent
@@ -29,10 +35,9 @@ CLOUD_CAMERA_WIDTH = 640
 CLOUD_CAMERA_HEIGHT = 480
 CLOUD_CAMERA_JPEG_QUALITY = 0.68
 
-CAMERA_MODES = (
-    "Cloud-compatible low-latency (recommended)",
-    "WebRTC real-time (advanced)",
-)
+WEBRTC_CAMERA_MODE = "WebRTC real-time (primary with TURN)"
+SNAPSHOT_CAMERA_MODE = "Low-bandwidth snapshot fallback (not real-time)"
+CAMERA_MODES = (WEBRTC_CAMERA_MODE, SNAPSHOT_CAMERA_MODE)
 CAMERA_FACING_OPTIONS = {
     "Rear / environment camera": "environment",
     "Front / selfie camera": "user",
@@ -125,14 +130,67 @@ def get_monitor(
     return st.session_state.browser_monitor
 
 
-def read_turn_settings() -> Mapping[str, object] | None:
-    """Read optional TURN credentials without requiring a local secrets file."""
+def read_secret_section(name: str) -> Mapping[str, object] | None:
+    """Read an optional mapping without requiring a local secrets file."""
 
     try:
-        settings = st.secrets.to_dict().get("turn")
+        settings = st.secrets.to_dict().get(name)
     except StreamlitSecretNotFoundError:
         return None
     return settings if isinstance(settings, Mapping) else None
+
+
+@st.cache_data(ttl=3300, show_spinner=False)
+def load_twilio_ice_servers(
+    account_sid: str,
+    auth_token: str,
+) -> list[dict[str, object]]:
+    """Cache Twilio's one-hour ephemeral relay credentials for 55 minutes."""
+
+    return fetch_twilio_ice_servers(account_sid, auth_token)
+
+
+def resolve_rtc_configuration() -> tuple[dict[str, object], str, str]:
+    """Resolve static or Twilio-backed TURN without exposing any credential."""
+
+    errors: list[str] = []
+    static_turn = read_secret_section("turn")
+    twilio = read_secret_section("twilio")
+    additional_servers: list[dict[str, object]] = []
+    providers: list[str] = []
+
+    if twilio:
+        account_sid = str(twilio.get("account_sid") or "").strip()
+        auth_token = str(twilio.get("auth_token") or "").strip()
+        if bool(account_sid) != bool(auth_token):
+            errors.append(
+                "Twilio secrets require both account_sid and auth_token."
+            )
+        elif account_sid and auth_token:
+            try:
+                additional_servers = load_twilio_ice_servers(
+                    account_sid,
+                    auth_token,
+                )
+                providers.append("Twilio ephemeral TURN")
+            except Exception as error:
+                errors.append(str(error))
+
+    try:
+        configuration = build_rtc_configuration(
+            static_turn,
+            additional_ice_servers=additional_servers,
+        )
+        if static_turn and has_turn_relay(configuration):
+            providers.append("static secret-backed TURN")
+    except ValueError as error:
+        errors.append(str(error))
+        configuration = build_rtc_configuration(
+            additional_ice_servers=additional_servers,
+        )
+
+    provider = " + ".join(dict.fromkeys(providers)) or "STUN only"
+    return configuration, " ".join(errors), provider
 
 
 def render_status(snapshot: MonitorSnapshot, playing: bool) -> None:
@@ -244,51 +302,150 @@ def render_webrtc_connection_status(
     webrtc_context,
     *,
     turn_enabled: bool,
+    turn_provider: str,
+    rtc_configuration: Mapping[str, object],
     status_key: str,
 ) -> None:
-    """Expose WebRTC signalling state and a clear cloud-camera fallback."""
+    """Expose frontend signalling plus server peer/ICE connection state."""
 
-    state = webrtc_context.state
+    diagnostics = inspect_webrtc_context(webrtc_context)
     started_key = f"webrtc_started_at_{status_key}"
+    failed = (
+        diagnostics.connection_state == "failed"
+        or diagnostics.ice_connection_state == "failed"
+    )
 
-    if state.playing:
+    if failed:
+        st.error(
+            "WebRTC failed during ICE negotiation. Use the snapshot fallback "
+            "for now and check the TURN settings below."
+        )
+    elif diagnostics.playing:
         st.session_state.pop(started_key, None)
-        st.success("WebRTC connection: connected")
-    elif state.signalling:
+        st.success(
+            "WebRTC connection: playing "
+            f"(ICE: {diagnostics.ice_connection_state})"
+        )
+    elif diagnostics.signalling:
         started_at = st.session_state.setdefault(started_key, time.monotonic())
         elapsed = time.monotonic() - started_at
         if elapsed >= 10:
             st.error(
-                "WebRTC connection failed to establish. Select "
-                "**Cloud-compatible low-latency** in the sidebar."
+                "WebRTC has not reached playing after 10 seconds. Select "
+                f"**{SNAPSHOT_CAMERA_MODE}** in the sidebar while checking TURN."
             )
         else:
-            st.info(f"WebRTC connection: connecting ({elapsed:.0f}s)")
+            st.info(
+                "WebRTC connection: connecting "
+                f"({elapsed:.0f}s, ICE: {diagnostics.ice_connection_state})"
+            )
     else:
         st.session_state.pop(started_key, None)
         st.info("WebRTC connection: ready — press START below.")
 
+    schemes = ", ".join(ice_url_schemes(rtc_configuration))
     if turn_enabled:
-        st.caption("TURN relay: configured from Streamlit secrets.")
+        st.caption(
+            f"ICE relay: {turn_provider}. URI schemes configured: {schemes}."
+        )
     else:
         st.warning(
-            "TURN relay is not configured. WebRTC may fail on mobile carriers, "
-            "school Wi-Fi, or symmetric NAT; cloud-compatible mode will still work."
+            "TURN relay is not configured, so WebRTC is not the default. It may "
+            "fail on mobile carriers, school Wi-Fi, or symmetric NAT. The "
+            "snapshot fallback still works but is not real-time."
         )
+
+
+@st.fragment(run_every=0.5)
+def render_latency_debug(
+    monitor: BrowserMonitor,
+    camera_mode: str,
+    webrtc_context=None,
+) -> None:
+    """Show measured pipeline timing and ICE state during deployment testing."""
+
+    snapshot = monitor.snapshot()
+    result_age_ms = (
+        max(0.0, (time.perf_counter() - snapshot.last_result_at) * 1000.0)
+        if snapshot.last_result_at
+        else 0.0
+    )
+
+    with st.sidebar:
+        with st.expander("Debug: latency"):
+            st.caption(f"Mode: {camera_mode}")
+            if camera_mode == WEBRTC_CAMERA_MODE:
+                st.write(
+                    "Incoming / analyzed / dropped: "
+                    f"{snapshot.received_frames} / "
+                    f"{snapshot.processed_frames} / "
+                    f"{snapshot.dropped_frames}"
+                )
+                st.write(
+                    "Detector: "
+                    f"{'busy' if snapshot.analysis_busy else 'ready'}"
+                )
+                st.write(
+                    "Current video callback: "
+                    f"{snapshot.last_video_callback_ms:.0f} ms"
+                )
+                st.write(
+                    "Latest capture→AI result: "
+                    f"{snapshot.last_capture_to_result_ms:.0f} ms"
+                )
+                st.write(
+                    "Annotation age on outgoing frame: "
+                    f"{snapshot.last_annotation_age_ms:.0f} ms"
+                )
+                diagnostics = inspect_webrtc_context(webrtc_context)
+                st.json(
+                    {
+                        "frontend_playing": diagnostics.playing,
+                        "frontend_signalling": diagnostics.signalling,
+                        "peer_connection": diagnostics.connection_state,
+                        "ice_connection": diagnostics.ice_connection_state,
+                        "ice_gathering": diagnostics.ice_gathering_state,
+                        "signaling": diagnostics.signaling_state,
+                    }
+                )
+            else:
+                st.write(
+                    "Browser capture→server response estimate: "
+                    f"{snapshot.last_snapshot_roundtrip_ms:.0f} ms"
+                )
+
+            st.write(
+                "AI inference (last / average): "
+                f"{snapshot.last_processing_ms:.0f} / "
+                f"{snapshot.average_processing_ms:.0f} ms"
+            )
+            st.write(f"Latest result age: {result_age_ms:.0f} ms")
+            st.caption(
+                "WebRTC timing begins when the server receives a frame. Snapshot "
+                "round-trip uses the browser capture timestamp and ends when the "
+                "server sends the annotated response; browser paint may add a "
+                "small amount."
+            )
 
 
 st.title("🛡️ SafePath AI")
 st.caption("AI-powered preventive home-safety monitor using your browser camera")
+
+rtc_configuration, turn_configuration_error, turn_provider = (
+    resolve_rtc_configuration()
+)
+turn_enabled = has_turn_relay(rtc_configuration)
 
 with st.sidebar:
     st.header("Monitoring settings")
     camera_mode = st.selectbox(
         "Camera connection",
         options=CAMERA_MODES,
+        index=0 if turn_enabled else 1,
         help=(
-            "Cloud-compatible mode uses compressed JPEG frames with server "
-            "backpressure. WebRTC has lower transport latency but needs TURN on "
-            "some networks."
+            "WebRTC is the only continuous real-time path and becomes the "
+            "default when a TURN relay is configured. The snapshot fallback "
+            "uses compressed JPEG request/response frames and is not smooth video."
         ),
     )
     camera_facing_label = st.selectbox(
@@ -383,13 +540,20 @@ except Exception as error:
 monitor_key = (
     id(detector),
     float(cooldown_seconds),
+    camera_mode,
 )
 monitor = get_monitor(detector, monitor_key, float(cooldown_seconds))
 
-if camera_mode == CAMERA_MODES[0]:
-    st.subheader("Cloud-compatible low-latency camera")
+active_webrtc_context = None
+
+if camera_mode == SNAPSHOT_CAMERA_MODE:
+    st.subheader("Low-bandwidth snapshot fallback")
+    st.warning(
+        "This mode sends individual camera snapshots through Streamlit. It is "
+        "near-real-time monitoring, not continuous or smooth video."
+    )
     st.caption(
-        f"Compressed {CLOUD_CAMERA_WIDTH}×{CLOUD_CAMERA_HEIGHT} JPEG frames, "
+        f"Compressed {CLOUD_CAMERA_WIDTH}×{CLOUD_CAMERA_HEIGHT} JPEG snapshots, "
         f"{CLOUD_CAMERA_INTERVAL_MS} ms minimum capture interval, server "
         f"backpressure, and {inference_size}px CPU inference."
     )
@@ -443,8 +607,11 @@ if camera_mode == CAMERA_MODES[0]:
                         st.image(
                             annotated_frame,
                             channels="BGR",
-                            caption="Live AI-analyzed camera frame",
+                            caption="Latest near-real-time AI snapshot",
                             use_container_width=True,
+                        )
+                        monitor.record_snapshot_roundtrip(
+                            capture.captured_at_epoch_ms
                         )
                 except Exception as error:
                     st.error(f"Could not process the browser frame: {error}")
@@ -458,22 +625,16 @@ if camera_mode == CAMERA_MODES[0]:
         start_hint="Switch on **Start monitoring** above and allow camera access.",
     )
 else:
-    st.subheader("WebRTC real-time camera")
+    st.subheader("WebRTC real-time camera (non-blocking AI)")
     st.caption(
         f"Preferred camera: **{camera_facing_label}**. If the browser ignores the "
-        "preference, use **SELECT DEVICE** in the camera panel."
+        "preference, use **SELECT DEVICE** in the camera panel. Video passes "
+        "through continuously; AI analyzes the latest frame without queuing old "
+        "frames."
     )
 
-    try:
-        rtc_configuration = build_rtc_configuration(read_turn_settings())
-        turn_configuration_error = ""
-    except ValueError as error:
-        rtc_configuration = build_rtc_configuration()
-        turn_configuration_error = str(error)
-
-    turn_enabled = has_turn_relay(rtc_configuration)
     if turn_configuration_error:
-        st.error(f"TURN secrets are incomplete: {turn_configuration_error}")
+        st.error(f"TURN setup error: {turn_configuration_error}")
 
     webrtc_context = webrtc_streamer(
         key=f"safepath-webrtc-{camera_facing_mode}",
@@ -487,12 +648,18 @@ else:
             "audio": False,
         },
         rtc_configuration=rtc_configuration,
-        async_processing=True,
+        # The callback itself is deliberately fast and only schedules YOLO in
+        # the background. Synchronous track passthrough therefore returns the
+        # current frame instead of streamlit-webrtc repeating an older output.
+        async_processing=False,
     )
+    active_webrtc_context = webrtc_context
 
     render_webrtc_connection_status(
         webrtc_context,
         turn_enabled=turn_enabled,
+        turn_provider=turn_provider,
+        rtc_configuration=rtc_configuration,
         status_key=camera_facing_mode,
     )
     live_status(
@@ -501,6 +668,12 @@ else:
         webrtc_context=webrtc_context,
         start_hint="Press **START** in the WebRTC panel and allow camera access.",
     )
+
+render_latency_debug(
+    monitor,
+    camera_mode,
+    webrtc_context=active_webrtc_context,
+)
 
 st.divider()
 st.caption(

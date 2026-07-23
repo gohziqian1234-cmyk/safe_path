@@ -7,14 +7,16 @@ warning, and records the high-risk event.
 
 ## Current capabilities
 
-- Low-latency cloud camera with front/rear preference and automatic fallback
-- Optional WebRTC mode with front/rear preference and device selection
-- Secret-backed TURN support for restrictive networks
+- Primary WebRTC camera with front/rear preference and device selection
+- Latest-frame asynchronous inference: slow AI drops frames instead of queuing
+- Smooth current-frame video with bounding boxes from the latest completed result
+- Static or Twilio-ephemeral secret-backed TURN support
+- Explicit low-bandwidth snapshot fallback, labeled as not real-time
 - YOLO11n and YOLO11s model choices plus a custom-weights path
 - CPU inference sizes from 320 to 640; 416 is the cloud default
 - Model runtime caching and one-time warm-up before camera frames arrive
 - Pre-inference frame downscaling with boxes restored to display coordinates
-- Live average AI-latency metric for benchmarking on the actual host
+- Live AI, pipeline, annotation-age, dropped-frame, and ICE diagnostics
 - Visible trapezoid walking/danger zone and conservative HIGH-risk rule
 - Browser voice warnings, event history, and a standalone OpenCV desktop mode
 
@@ -25,11 +27,18 @@ device.
 
 ## Performance changes
 
-The cloud camera captures a 640x480 JPEG at quality 0.68. It waits at least
+The snapshot fallback captures a 640x480 JPEG at quality 0.68. It waits at least
 200 ms between frames and does not send another frame until Streamlit has
 finished the previous rerun, so CPU work cannot create an unbounded browser
 queue. Before YOLO, a 640x480 frame is reduced to 416x312. Detection boxes are
 then scaled back to the original 640x480 frame for risk evaluation and display.
+
+The remaining Streamlit request/rerender delay is architectural. SafePath does
+not describe this path as smooth video. In WebRTC mode, the current frame is
+returned immediately. At most one YOLO job runs in the background; every frame
+that arrives while that job is busy is counted and dropped from AI analysis.
+The moving video therefore never waits behind an inference backlog, while the
+latest completed assessment is drawn over current frames.
 
 Local Windows CPU measurements from the same synthetic 640x480 input:
 
@@ -60,35 +69,48 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Open `http://localhost:8501`, select a camera direction, switch on
-**Start monitoring**, and allow camera access. The first model load includes a
-warm-up pass; later reruns reuse the cached model runtime.
+Open `http://localhost:8501`, select a camera direction, press **START** in the
+WebRTC panel, and allow camera access. Without TURN secrets, SafePath initially
+selects the snapshot fallback; you can still select WebRTC for local testing.
+The first model load includes a warm-up pass; later reruns reuse the cached
+model runtime.
 
 ## Camera modes
 
-### Cloud-compatible low-latency
-
-This is the public-app default. SafePath's small built-in Streamlit component
-uses `getUserMedia`, requests the selected `facingMode` exactly, and falls back
-to the other camera or the browser default when that device does not exist. It
-sends compressed JPEG frames through Streamlit's existing secure connection and
-does not depend on peer-to-peer ICE negotiation.
-
 ### WebRTC real-time
 
-WebRTC has the lowest transport latency when ICE succeeds. The sidebar sends
+WebRTC is the only continuous real-time path. It becomes the initial sidebar
+selection automatically when the resolved ICE configuration contains a TURN
+relay. The current video frame passes through independently from YOLO; the
+detector accepts one latest frame at a time and drops analysis frames while
+busy.
+
+The sidebar sends
 `facingMode: environment` or `facingMode: user` as the preferred video
 constraint. The WebRTC panel also exposes **SELECT DEVICE** when the browser
 allows direct device selection.
 
-The dashboard shows Ready, Connecting, Connected, or a ten-second failure
-message. If WebRTC cannot connect, switch back to cloud-compatible mode.
+The dashboard shows ready, connecting, playing, timeout, and ICE-failure states.
+Open **Debug: latency** in the sidebar to see frontend playing/signalling,
+server peer connection, ICE connection/gathering, signaling state, incoming /
+analyzed / dropped frame counts, callback time, capture-to-result latency, and
+annotation age.
+
+### Low-bandwidth snapshot fallback (not real-time)
+
+SafePath's small built-in Streamlit component uses `getUserMedia`, requests the
+selected `facingMode` exactly, and falls back to the other camera or the browser
+default when that device does not exist. It sends compressed JPEG snapshots
+through Streamlit's existing secure connection and does not depend on ICE.
+The sidebar debug panel reports a browser-capture-to-server-response estimate.
 
 ## Configure TURN securely
 
-Do not commit TURN usernames or credentials. Copy the shape from
-`.streamlit/secrets.toml.example` into the deployed app's Streamlit **Secrets**
-panel:
+Do not commit TURN usernames or credentials. Copy one of the provider shapes
+from `.streamlit/secrets.toml.example` into the deployed app's Streamlit
+**Secrets** panel.
+
+For Metered, OpenRelay, or coturn static credentials:
 
 ```toml
 [turn]
@@ -101,9 +123,31 @@ username = "YOUR_EPHEMERAL_USERNAME"
 credential = "YOUR_EPHEMERAL_CREDENTIAL"
 ```
 
-Metered, Twilio Network Traversal, or a private coturn server can provide these
-values. Without all three fields, SafePath deliberately uses STUN only and
-shows a warning; the cloud-compatible camera remains available.
+For Twilio Network Traversal:
+
+```toml
+[twilio]
+account_sid = "ACXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX"
+auth_token = "YOUR_TWILIO_AUTH_TOKEN"
+```
+
+SafePath sends the SID/token only from the Streamlit server to Twilio's token
+endpoint, receives one-hour ephemeral ICE credentials, and caches them for 55
+minutes. The browser receives only the temporary TURN username and credential,
+not the Twilio account token.
+
+Restart the deployed app after saving secrets. Select WebRTC, press **START**,
+then confirm all of the following in **Debug: latency**:
+
+- `frontend_playing` is `true`
+- `peer_connection` is `connected`
+- `ice_connection` is `connected` or `completed`
+- `ice_gathering` is `complete`
+
+Test again from a phone with Wi-Fi disabled. That cellular test cannot be
+automated by the repository and is the meaningful proof that relay traversal
+works. Without complete credentials SafePath deliberately uses STUN only,
+selects the snapshot fallback initially, and shows a warning.
 
 ## Detection settings
 
@@ -166,9 +210,11 @@ Press `Q` in the camera window to stop.
 python -m unittest discover -s tests -v
 ```
 
-The tests cover danger-zone logic, monitor state and latency, frame decoding and
-resizing, restored box coordinates, one-time model warm-up, shared runtime use,
-camera facing/JPEG backpressure, and secret-backed TURN configuration.
+The tests cover danger-zone logic, monitor state and latency, explicit
+latest-frame dropping, non-blocking WebRTC output, peer/ICE diagnostics, frame
+decoding and resizing, restored box coordinates, one-time model warm-up, shared
+runtime use, camera facing/JPEG backpressure and capture timestamps, static
+TURN configuration, and Twilio ephemeral-token parsing.
 
 ## Project structure
 
@@ -180,7 +226,8 @@ safepath-ai/
 |-- camera_feed.py                 Frame decoding and inference downscaling
 |-- detection.py                   Cached YOLO runtime and desktop camera mode
 |-- web_monitor.py                 Thread-safe state, latency, and alerts
-|-- rtc_config.py                  STUN plus optional secret-backed TURN
+|-- rtc_config.py                  STUN, static TURN, and Twilio token exchange
+|-- webrtc_diagnostics.py          Safe peer/ICE state inspection
 |-- risk_engine.py                 Pure danger-zone decision logic
 |-- event_store.py                 CSV and high-risk snapshots
 |-- .streamlit/secrets.toml.example

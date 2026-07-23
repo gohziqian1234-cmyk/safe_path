@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import math
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -26,6 +27,7 @@ class CameraCapture:
     requested_facing_mode: str = "environment"
     active_facing_mode: str = ""
     error: str = ""
+    captured_at_epoch_ms: float | None = None
 
 
 def camera_capture(
@@ -61,6 +63,14 @@ def camera_capture(
         _prefix, encoded = data_url.split(",", 1)
         image = BytesIO(base64.b64decode(encoded))
 
+    raw_capture_time = value.get("capturedAtEpochMs")
+    try:
+        captured_at_epoch_ms = float(raw_capture_time)
+        if not math.isfinite(captured_at_epoch_ms):
+            captured_at_epoch_ms = None
+    except (TypeError, ValueError):
+        captured_at_epoch_ms = None
+
     return CameraCapture(
         status=str(value.get("status") or "starting"),
         image=image,
@@ -69,4 +79,5 @@ def camera_capture(
         ),
         active_facing_mode=str(value.get("activeFacingMode") or ""),
         error=str(value.get("error") or ""),
+        captured_at_epoch_ms=captured_at_epoch_ms,
     )
