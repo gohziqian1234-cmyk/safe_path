@@ -44,6 +44,11 @@ therefore remains the Streamlit Community Cloud default. Host speed varies, so
 the dashboard reports **Average AI latency** from the current Streamlit Cloud
 process; switch models while monitoring to compare the real deployment.
 
+On the deployed Community Cloud app, the 200 ms setting sustained 20 processed
+YOLO11n/416 frames in a steady 10-second window (about 2 FPS) with 43 ms average
+AI inference. The remaining cadence is Streamlit rerun/transport overhead, not
+model inference; backpressure intentionally favors current frames over a queue.
+
 ## Run locally on Windows
 
 Python 3.11 or newer is recommended:
