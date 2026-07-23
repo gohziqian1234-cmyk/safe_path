@@ -24,7 +24,7 @@ from web_monitor import BrowserMonitor, MonitorSnapshot
 
 APP_DIRECTORY = Path(__file__).parent
 EVENT_STORE = EventStore(APP_DIRECTORY / "outputs")
-CLOUD_CAMERA_INTERVAL_MS = 300
+CLOUD_CAMERA_INTERVAL_MS = 200
 CLOUD_CAMERA_WIDTH = 640
 CLOUD_CAMERA_HEIGHT = 480
 CLOUD_CAMERA_JPEG_QUALITY = 0.68

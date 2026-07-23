@@ -26,7 +26,7 @@ device.
 ## Performance changes
 
 The cloud camera captures a 640x480 JPEG at quality 0.68. It waits at least
-300 ms between frames and does not send another frame until Streamlit has
+200 ms between frames and does not send another frame until Streamlit has
 finished the previous rerun, so CPU work cannot create an unbounded browser
 queue. Before YOLO, a 640x480 frame is reduced to 416x312. Detection boxes are
 then scaled back to the original 640x480 frame for risk evaluation and display.
