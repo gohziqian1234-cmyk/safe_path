@@ -1,7 +1,6 @@
 ultralytics>=8.3,<9
 opencv-python>=4.10,<5
 streamlit>=1.37,<2
-streamlit-camera-input-live==0.2.0
 streamlit-webrtc>=0.76.2,<0.77
 pyttsx3>=2.98,<3; platform_system == "Windows"
 pandas>=2.2,<3

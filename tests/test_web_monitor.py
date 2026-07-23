@@ -62,6 +62,21 @@ class BrowserMonitorTests(unittest.TestCase):
         self.assertEqual(snapshot.warning_sequence, 0)
         self.assertEqual(events.records, [])
 
+    def test_processing_latency_uses_exponential_moving_average(self):
+        timer_values = iter([1.0, 1.1, 2.0, 2.3])
+        monitor = BrowserMonitor(
+            detector=FakeDetector(self.make_assessment(high_risk=False)),
+            event_store=FakeEventStore(),
+            timer=lambda: next(timer_values),
+        )
+
+        monitor.process_image("frame-one")
+        monitor.process_image("frame-two")
+
+        snapshot = monitor.snapshot()
+        self.assertAlmostEqual(snapshot.last_processing_ms, 300.0)
+        self.assertAlmostEqual(snapshot.average_processing_ms, 140.0)
+
 
 if __name__ == "__main__":
     unittest.main()

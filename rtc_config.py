@@ -1,55 +1,65 @@
-"""WebRTC network configuration for local and cloud SafePath sessions."""
+"""WebRTC ICE configuration with optional secret-backed TURN credentials."""
 
 from __future__ import annotations
 
-import base64
-import hashlib
-import hmac
-import time
+from collections.abc import Mapping, Sequence
 
 
-PUBLIC_TURN_HOST = "staticauth.openrelay.metered.ca"
-PUBLIC_TURN_SECRET = "openrelayprojectsecret"
-TURN_CREDENTIAL_LIFETIME_SECONDS = 24 * 60 * 60
+DEFAULT_STUN_URLS = (
+    "stun:stun.l.google.com:19302",
+    "stun:stun1.l.google.com:19302",
+)
 
 
-def create_temporary_turn_credentials(
-    *,
-    now: float | None = None,
-    lifetime_seconds: int = TURN_CREDENTIAL_LIFETIME_SECONDS,
-    user_id: str = "safepath",
-) -> tuple[str, str]:
-    """Create coturn REST credentials for Metered's public static-auth relay."""
-
-    issued_at = time.time() if now is None else float(now)
-    expires_at = int(issued_at + max(60, int(lifetime_seconds)))
-    username = f"{expires_at}:{user_id}"
-    digest = hmac.new(
-        PUBLIC_TURN_SECRET.encode("utf-8"),
-        username.encode("utf-8"),
-        hashlib.sha1,
-    ).digest()
-    credential = base64.b64encode(digest).decode("ascii")
-    return username, credential
+def _normalize_urls(value: object) -> list[str]:
+    if isinstance(value, str):
+        return [value] if value.strip() else []
+    if isinstance(value, Sequence):
+        return [str(item).strip() for item in value if str(item).strip()]
+    return []
 
 
-def build_rtc_configuration(*, now: float | None = None) -> dict[str, object]:
-    """Return STUN plus TURN routes suitable for Streamlit Community Cloud."""
+def build_rtc_configuration(
+    turn_settings: Mapping[str, object] | None = None,
+) -> dict[str, object]:
+    """Build STUN configuration and append a TURN relay when secrets exist."""
 
-    username, credential = create_temporary_turn_credentials(now=now)
+    ice_servers: list[dict[str, object]] = [
+        {"urls": list(DEFAULT_STUN_URLS)},
+    ]
+
+    if turn_settings:
+        urls = _normalize_urls(turn_settings.get("urls"))
+        username = str(turn_settings.get("username") or "").strip()
+        credential = str(turn_settings.get("credential") or "").strip()
+        supplied_values = bool(urls or username or credential)
+        complete = bool(urls and username and credential)
+        if supplied_values and not complete:
+            raise ValueError(
+                "TURN secrets require urls, username, and credential."
+            )
+        if complete:
+            ice_servers.append(
+                {
+                    "urls": urls,
+                    "username": username,
+                    "credential": credential,
+                }
+            )
+
     return {
-        "iceServers": [
-            {"urls": ["stun:stun.l.google.com:19302"]},
-            {
-                "urls": [
-                    f"turn:{PUBLIC_TURN_HOST}:80",
-                    f"turn:{PUBLIC_TURN_HOST}:443",
-                    f"turn:{PUBLIC_TURN_HOST}:443?transport=tcp",
-                    f"turns:{PUBLIC_TURN_HOST}:443?transport=tcp",
-                ],
-                "username": username,
-                "credential": credential,
-            },
-        ],
+        "iceServers": ice_servers,
         "iceCandidatePoolSize": 10,
     }
+
+
+def has_turn_relay(configuration: Mapping[str, object]) -> bool:
+    """Return whether an ICE configuration contains a TURN/TURNS URL."""
+
+    for server in configuration.get("iceServers", []):
+        if not isinstance(server, Mapping):
+            continue
+        for url in _normalize_urls(server.get("urls")):
+            if url.startswith(("turn:", "turns:")):
+                return True
+    return False

@@ -3,7 +3,7 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .streamlit/secrets.toml
-yolo11n.pt
+yolo11*.pt
 Ultralytics/
 models/*.pt
 outputs/*

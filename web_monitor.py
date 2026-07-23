@@ -32,6 +32,8 @@ class MonitorSnapshot:
     warning_message: str = ""
     processed_frames: int = 0
     last_error: str = ""
+    last_processing_ms: float = 0.0
+    average_processing_ms: float = 0.0
 
 
 class BrowserMonitor:
@@ -43,11 +45,13 @@ class BrowserMonitor:
         event_store: EventRecorder,
         cooldown_seconds: float = 8.0,
         clock: Callable[[], float] = time.monotonic,
+        timer: Callable[[], float] = time.perf_counter,
     ) -> None:
         self.detector = detector
         self.event_store = event_store
         self.cooldown_seconds = max(0.0, float(cooldown_seconds))
         self._clock = clock
+        self._timer = timer
         self._processing_lock = threading.Lock()
         self._state_lock = threading.Lock()
         self._snapshot = MonitorSnapshot()
@@ -57,7 +61,12 @@ class BrowserMonitor:
         """Process one BGR image and update the shared monitor state."""
 
         with self._processing_lock:
+            processing_started = self._timer()
             annotated, assessment = self.detector.process_frame(image)
+            processing_ms = max(
+                0.0,
+                (self._timer() - processing_started) * 1000.0,
+            )
             now = self._clock()
             warning_issued = (
                 assessment.risk_level == "HIGH"
@@ -78,6 +87,13 @@ class BrowserMonitor:
 
             with self._state_lock:
                 previous = self._snapshot
+                if previous.processed_frames:
+                    average_processing_ms = (
+                        0.80 * previous.average_processing_ms
+                        + 0.20 * processing_ms
+                    )
+                else:
+                    average_processing_ms = processing_ms
                 self._snapshot = MonitorSnapshot(
                     assessment=assessment,
                     warning_sequence=(
@@ -92,6 +108,8 @@ class BrowserMonitor:
                     ),
                     processed_frames=previous.processed_frames + 1,
                     last_error=error_message,
+                    last_processing_ms=processing_ms,
+                    average_processing_ms=average_processing_ms,
                 )
             return annotated
 
@@ -113,6 +131,8 @@ class BrowserMonitor:
                     warning_message=previous.warning_message,
                     processed_frames=previous.processed_frames,
                     last_error=str(error),
+                    last_processing_ms=previous.last_processing_ms,
+                    average_processing_ms=previous.average_processing_ms,
                 )
             return frame
 

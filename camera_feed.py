@@ -25,3 +25,33 @@ def decode_camera_frame(camera_image: CameraImage) -> tuple[str, np.ndarray]:
         raise ValueError("The browser returned a camera frame that could not be decoded.")
 
     return sha256(encoded).hexdigest(), frame
+
+
+def resize_for_inference(
+    frame: np.ndarray,
+    max_side: int,
+) -> tuple[np.ndarray, float, float]:
+    """Downscale a frame and return x/y factors for restoring box coordinates."""
+
+    frame_height, frame_width = frame.shape[:2]
+    if frame_height <= 0 or frame_width <= 0:
+        raise ValueError("Camera frame dimensions must be positive.")
+
+    target_side = max(160, int(max_side))
+    longest_side = max(frame_height, frame_width)
+    if longest_side <= target_side:
+        return frame, 1.0, 1.0
+
+    scale = target_side / float(longest_side)
+    resized_width = max(1, round(frame_width * scale))
+    resized_height = max(1, round(frame_height * scale))
+    resized = cv2.resize(
+        frame,
+        (resized_width, resized_height),
+        interpolation=cv2.INTER_AREA,
+    )
+    return (
+        resized,
+        frame_width / float(resized_width),
+        frame_height / float(resized_height),
+    )
