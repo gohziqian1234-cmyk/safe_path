@@ -480,10 +480,16 @@ with st.sidebar:
     inference_size = st.select_slider(
         "Inference image size",
         options=(320, 416, 512, 640),
-        value=416,
+        value=320 if camera_mode == WEBRTC_CAMERA_MODE else 416,
+        key=(
+            "webrtc_inference_size"
+            if camera_mode == WEBRTC_CAMERA_MODE
+            else "snapshot_inference_size"
+        ),
         help=(
-            "416 is the CPU-friendly default. Higher sizes can improve small-object "
-            "recall but increase latency."
+            "WebRTC defaults to 320 to leave CPU for video transport. The "
+            "snapshot fallback defaults to 416. Higher sizes can improve "
+            "small-object recall but increase latency."
         ),
     )
     confidence = st.slider(
@@ -644,6 +650,7 @@ else:
                 "facingMode": {"ideal": camera_facing_mode},
                 "width": {"ideal": CLOUD_CAMERA_WIDTH},
                 "height": {"ideal": CLOUD_CAMERA_HEIGHT},
+                "frameRate": {"ideal": 15, "max": 20},
             },
             "audio": False,
         },

@@ -13,7 +13,7 @@ warning, and records the high-risk event.
 - Static or Twilio-ephemeral secret-backed TURN support
 - Explicit low-bandwidth snapshot fallback, labeled as not real-time
 - YOLO11n and YOLO11s model choices plus a custom-weights path
-- CPU inference sizes from 320 to 640; 416 is the cloud default
+- CPU inference sizes from 320 to 640; WebRTC defaults to 320 and snapshots to 416
 - Model runtime caching and one-time warm-up before camera frames arrive
 - Pre-inference frame downscaling with boxes restored to display coordinates
 - Live AI, pipeline, annotation-age, dropped-frame, and ICE diagnostics
@@ -39,6 +39,10 @@ returned immediately. At most one YOLO job runs in the background; every frame
 that arrives while that job is busy is counted and dropped from AI analysis.
 The moving video therefore never waits behind an inference backlog, while the
 latest completed assessment is drawn over current frames.
+
+The WebRTC camera requests 15 FPS (20 maximum) and defaults to 320px inference
+so the free-tier CPU keeps capacity for video decode/encode. The snapshot
+fallback retains the 416px default because it has no continuous video workload.
 
 Local Windows CPU measurements from the same synthetic 640x480 input:
 
@@ -155,8 +159,9 @@ selects the snapshot fallback initially, and shows a warning.
 - **YOLO11s:** better general COCO accuracy, but noticeably slower.
 - **Custom weights path:** intended for a validated `models/cable.pt` or a
   future multi-hazard model.
-- **Inference image size:** 416 is the speed/accuracy default; 320 is faster,
-  while 512 and 640 can help small objects at higher CPU cost.
+- **Inference image size:** WebRTC defaults to 320 to protect the live video
+  path; snapshots default to 416. Sizes 512 and 640 can help small objects at
+  substantially higher CPU cost.
 - **Confidence:** remains 0.40 because `videos/` currently has no labeled hazard
   footage. Lowering it without validation would simply trade false negatives
   for unknown false-positive rates.
