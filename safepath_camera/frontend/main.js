@@ -1,5 +1,8 @@
 const video = document.getElementById("camera");
-const canvas = document.getElementById("frame");
+const captureCanvas = document.getElementById("capture-frame");
+const overlayCanvas = document.getElementById("overlay");
+const previewShell = document.getElementById("preview-shell");
+const cameraStatus = document.getElementById("camera-status");
 
 const state = {
   initialized: false,
@@ -9,7 +12,17 @@ const state = {
   requestedFacingMode: "environment",
   activeFacingMode: "",
   args: null,
+  lastOverlayRevision: null,
 };
+
+function setCameraStatus(message, status = "starting") {
+  cameraStatus.textContent = message;
+  cameraStatus.dataset.state = status;
+}
+
+function updateFrameHeight() {
+  Streamlit.setFrameHeight(Math.ceil(previewShell.getBoundingClientRect().height));
+}
 
 function sendStatus(status, extra = {}) {
   Streamlit.setComponentValue({
@@ -32,6 +45,77 @@ function stopStream() {
     state.stream.getTracks().forEach((track) => track.stop());
     state.stream = null;
   }
+}
+
+function drawOverlay(overlay) {
+  const width = state.args?.width || 640;
+  const height = state.args?.height || 480;
+  if (overlayCanvas.width !== width) {
+    overlayCanvas.width = width;
+  }
+  if (overlayCanvas.height !== height) {
+    overlayCanvas.height = height;
+  }
+
+  const context = overlayCanvas.getContext("2d");
+  context.clearRect(0, 0, width, height);
+  if (!overlay || !Array.isArray(overlay.zonePoints)) {
+    return;
+  }
+
+  const highRisk = overlay.riskLevel === "HIGH";
+  const zoneColor = highRisk ? "#ef4444" : "#22c55e";
+  const zoneFill = highRisk
+    ? "rgba(239, 68, 68, 0.18)"
+    : "rgba(34, 197, 94, 0.16)";
+
+  context.beginPath();
+  overlay.zonePoints.forEach(([x, y], index) => {
+    if (index === 0) {
+      context.moveTo(x, y);
+    } else {
+      context.lineTo(x, y);
+    }
+  });
+  context.closePath();
+  context.fillStyle = zoneFill;
+  context.fill();
+  context.strokeStyle = zoneColor;
+  context.lineWidth = 3;
+  context.stroke();
+
+  context.font = "600 16px Inter, sans-serif";
+  context.textBaseline = "bottom";
+  for (const detection of overlay.detections || []) {
+    const [x1, y1, x2, y2] = detection.box;
+    const color =
+      detection.label.toLowerCase() === "person"
+        ? "#f59e0b"
+        : detection.inDangerZone
+          ? "#ef4444"
+          : "#22c55e";
+    context.strokeStyle = color;
+    context.lineWidth = 3;
+    context.strokeRect(x1, y1, x2 - x1, y2 - y1);
+
+    const confidence = Math.round(detection.confidence * 100);
+    const label = `${detection.label} ${confidence}%`;
+    const labelWidth = context.measureText(label).width + 12;
+    const labelY = Math.max(22, y1);
+    context.fillStyle = color;
+    context.fillRect(x1, labelY - 22, labelWidth, 22);
+    context.fillStyle = "#ffffff";
+    context.fillText(label, x1 + 6, labelY - 3);
+  }
+
+  context.fillStyle = highRisk
+    ? "rgba(220, 38, 38, 0.92)"
+    : "rgba(22, 101, 52, 0.88)";
+  context.fillRect(0, 0, width, 38);
+  context.fillStyle = "#ffffff";
+  context.font = "700 18px Inter, sans-serif";
+  context.textBaseline = "middle";
+  context.fillText(`SAFEPATH RISK: ${overlay.riskLevel || "LOW"}`, 14, 19);
 }
 
 function cameraConstraints(facingMode, args) {
@@ -57,7 +141,7 @@ async function startCamera(args) {
   state.requestedFacingMode = args.facingMode;
   state.activeFacingMode = "";
   state.waitingForServer = true;
-  sendStatus("starting");
+  setCameraStatus("Starting camera…");
 
   const fallbackFacing =
     args.facingMode === "environment" ? "user" : "environment";
@@ -77,12 +161,14 @@ async function startCamera(args) {
           },
         });
       } catch (genericError) {
+        const message =
+          genericError?.message ||
+          fallbackError?.message ||
+          preferredError?.message ||
+          "Camera access failed.";
+        setCameraStatus(message, "error");
         sendStatus("error", {
-          error:
-            genericError?.message ||
-            fallbackError?.message ||
-            preferredError?.message ||
-            "Camera access failed.",
+          error: message,
         });
         return;
       }
@@ -94,6 +180,8 @@ async function startCamera(args) {
   const settings = state.stream.getVideoTracks()[0]?.getSettings?.() || {};
   state.activeFacingMode = settings.facingMode || fallbackFacing;
   state.waitingForServer = true;
+  setCameraStatus("Camera live · starting AI", "ready");
+  updateFrameHeight();
   sendStatus("ready");
 }
 
@@ -119,13 +207,19 @@ function captureFrame() {
     return;
   }
 
-  canvas.width = state.args.width;
-  canvas.height = state.args.height;
-  const context = canvas.getContext("2d", { alpha: false });
-  context.drawImage(video, 0, 0, canvas.width, canvas.height);
+  captureCanvas.width = state.args.width;
+  captureCanvas.height = state.args.height;
+  const context = captureCanvas.getContext("2d", { alpha: false });
+  context.drawImage(
+    video,
+    0,
+    0,
+    captureCanvas.width,
+    captureCanvas.height,
+  );
 
   // JPEG is substantially smaller than the PNG used by camera_input_live.
-  const image = canvas.toDataURL("image/jpeg", state.args.jpegQuality);
+  const image = captureCanvas.toDataURL("image/jpeg", state.args.jpegQuality);
   const capturedAtEpochMs = Date.now();
   state.waitingForServer = true;
   Streamlit.setComponentValue({
@@ -140,7 +234,8 @@ function captureFrame() {
 
 function onRender(event) {
   const nextArgs = event.detail.args;
-  Streamlit.setFrameHeight(0);
+  previewShell.style.aspectRatio = `${nextArgs.width} / ${nextArgs.height}`;
+  updateFrameHeight();
 
   if (!navigator.mediaDevices?.getUserMedia) {
     sendStatus("error", {
@@ -158,6 +253,16 @@ function onRender(event) {
 
   const facingChanged = nextArgs.facingMode !== state.requestedFacingMode;
   state.args = nextArgs;
+  if (nextArgs.overlayRevision !== state.lastOverlayRevision) {
+    state.lastOverlayRevision = nextArgs.overlayRevision;
+    drawOverlay(nextArgs.overlay);
+    if (nextArgs.overlay?.processedFrames) {
+      setCameraStatus(
+        `Camera live · AI frame ${nextArgs.overlay.processedFrames}`,
+        "ready",
+      );
+    }
+  }
   state.waitingForServer = false;
   if (facingChanged) {
     startCamera(nextArgs);
@@ -168,5 +273,7 @@ function onRender(event) {
 
 Streamlit.events.addEventListener(Streamlit.RENDER_EVENT, onRender);
 Streamlit.setComponentReady();
-Streamlit.setFrameHeight(0);
+updateFrameHeight();
+video.addEventListener("loadedmetadata", updateFrameHeight);
+window.addEventListener("resize", updateFrameHeight);
 window.addEventListener("beforeunload", stopStream);

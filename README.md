@@ -11,7 +11,7 @@ warning, and records the high-risk event.
 - Latest-frame asynchronous inference: slow AI drops frames instead of queuing
 - Smooth current-frame video with bounding boxes from the latest completed result
 - Static or Twilio-ephemeral secret-backed TURN support
-- Explicit low-bandwidth snapshot fallback, labeled as not real-time
+- Smooth browser-local preview with a snapshot-powered AI overlay
 - YOLO11n and YOLO11s model choices plus a custom-weights path
 - CPU inference sizes from 320 to 640; WebRTC defaults to 320 and snapshots to 416
 - Model runtime caching and one-time warm-up before camera frames arrive
@@ -27,22 +27,29 @@ device.
 
 ## Performance changes
 
-The snapshot fallback captures a 640x480 JPEG at quality 0.68. It waits at least
-200 ms between frames and does not send another frame until Streamlit has
-finished the previous rerun, so CPU work cannot create an unbounded browser
-queue. Before YOLO, a 640x480 frame is reduced to 416x312. Detection boxes are
-then scaled back to the original 640x480 frame for risk evaluation and display.
+The recommended fallback keeps one persistent `getUserMedia` video preview in
+the browser, so Streamlit reruns never replace the moving camera image. It sends
+a 640x480 JPEG at quality 0.68 for AI analysis, waits at least 200 ms between
+captures, and never sends another frame until Streamlit finishes the previous
+rerun. The server returns only detection coordinates, risk state, and the danger
+zone; a transparent browser canvas updates those overlays without flickering the
+video.
 
-The remaining Streamlit request/rerender delay is architectural. SafePath does
-not describe this path as smooth video. In WebRTC mode, the current frame is
-returned immediately. At most one YOLO job runs in the background; every frame
-that arrives while that job is busy is counted and dropped from AI analysis.
-The moving video therefore never waits behind an inference backlog, while the
-latest completed assessment is drawn over current frames.
+Before YOLO, a 640x480 frame is reduced to 416x312. Detection boxes are scaled
+back to the original coordinates for risk evaluation and the browser overlay.
+The preview is smooth browser video, while the AI annotations remain
+near-real-time snapshots whose rate depends on the available CPU and network.
+
+In WebRTC mode, the current frame is returned immediately. At most one YOLO job
+runs in the background; every frame that arrives while that job is busy is
+counted and dropped from AI analysis. The moving video therefore never waits
+behind an inference backlog, while the latest completed assessment is drawn over
+current frames.
 
 The WebRTC camera requests 15 FPS (20 maximum) and defaults to 320px inference
-so the free-tier CPU keeps capacity for video decode/encode. The snapshot
-fallback retains the 416px default because it has no continuous video workload.
+so the free-tier CPU keeps capacity for video decode/encode. The smooth-preview
+fallback retains the 416px default because its continuous preview does not pass
+through the server.
 
 Local Windows CPU measurements from the same synthetic 640x480 input:
 
@@ -82,11 +89,10 @@ py -3.11 -m venv .venv
 .\.venv\Scripts\python.exe -m streamlit run app.py
 ```
 
-Open `http://localhost:8501`, select a camera direction, press **START** in the
-WebRTC panel, and allow camera access. Without TURN secrets, SafePath initially
-selects the snapshot fallback; you can still select WebRTC for local testing.
-The first model load includes a warm-up pass; later reruns reuse the cached
-model runtime.
+Open `http://localhost:8501`, switch on **Start monitoring**, and allow camera
+access. Without TURN secrets, SafePath initially selects the smooth local
+preview; you can still select WebRTC for local testing. The first model load
+includes a warm-up pass; later reruns reuse the cached model runtime.
 
 ## Camera modes
 
@@ -109,13 +115,15 @@ server peer connection, ICE connection/gathering, signaling state, incoming /
 analyzed / dropped frame counts, callback time, capture-to-result latency, and
 annotation age.
 
-### Low-bandwidth snapshot fallback (not real-time)
+### Smooth local preview + AI snapshots
 
 SafePath's small built-in Streamlit component uses `getUserMedia`, requests the
 selected `facingMode` exactly, and falls back to the other camera or the browser
-default when that device does not exist. It sends compressed JPEG snapshots
-through Streamlit's existing secure connection and does not depend on ICE.
-The sidebar debug panel reports a browser-capture-to-server-response estimate.
+default when that device does not exist. The component keeps the browser video
+element mounted continuously and draws the latest danger zone, boxes, labels,
+and risk level on a separate canvas. It sends compressed JPEG snapshots through
+Streamlit's existing secure connection and does not depend on ICE. The sidebar
+debug panel reports a browser-capture-to-server-response estimate.
 
 ## Configure TURN securely
 
@@ -160,7 +168,7 @@ then confirm all of the following in **Debug: latency**:
 Test again from a phone with Wi-Fi disabled. That cellular test cannot be
 automated by the repository and is the meaningful proof that relay traversal
 works. Without complete credentials SafePath deliberately uses STUN only,
-selects the snapshot fallback initially, and shows a warning.
+selects the smooth local preview initially, and shows a warning.
 
 ## Detection settings
 
@@ -227,8 +235,9 @@ python -m unittest discover -s tests -v
 The tests cover danger-zone logic, monitor state and latency, explicit
 latest-frame dropping, non-blocking WebRTC output, peer/ICE diagnostics, frame
 decoding and resizing, restored box coordinates, one-time model warm-up, shared
-runtime use, camera facing/JPEG backpressure and capture timestamps, static
-TURN configuration, and Twilio ephemeral-token parsing.
+runtime use, camera facing/JPEG backpressure, persistent preview overlays and
+capture timestamps, static TURN configuration, and Twilio ephemeral-token
+parsing.
 
 ## Project structure
 

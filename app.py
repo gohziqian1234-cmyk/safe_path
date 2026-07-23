@@ -36,7 +36,7 @@ CLOUD_CAMERA_HEIGHT = 480
 CLOUD_CAMERA_JPEG_QUALITY = 0.68
 
 WEBRTC_CAMERA_MODE = "WebRTC real-time (primary with TURN)"
-SNAPSHOT_CAMERA_MODE = "Low-bandwidth snapshot fallback (not real-time)"
+SNAPSHOT_CAMERA_MODE = "Smooth local preview + AI snapshots (recommended)"
 CAMERA_MODES = (WEBRTC_CAMERA_MODE, SNAPSHOT_CAMERA_MODE)
 CAMERA_FACING_OPTIONS = {
     "Rear / environment camera": "environment",
@@ -213,6 +213,32 @@ def render_status(snapshot: MonitorSnapshot, playing: bool) -> None:
     st.metric("Average AI latency", latency_value)
 
 
+def build_camera_overlay(
+    snapshot: MonitorSnapshot,
+) -> dict[str, object] | None:
+    """Serialize the latest assessment for the persistent browser overlay."""
+
+    assessment = snapshot.assessment
+    if assessment is None:
+        return None
+    return {
+        "riskLevel": assessment.risk_level,
+        "zonePoints": [
+            [int(x), int(y)] for x, y in assessment.zone_points
+        ],
+        "detections": [
+            {
+                "label": detection.label,
+                "confidence": float(detection.confidence),
+                "box": [float(value) for value in detection.box],
+                "inDangerZone": bool(detection.in_danger_zone),
+            }
+            for detection in assessment.detections
+        ],
+        "processedFrames": snapshot.processed_frames,
+    }
+
+
 def render_events() -> None:
     st.subheader("Recent high-risk events")
     rows = EVENT_STORE.read_recent(limit=10)
@@ -352,7 +378,8 @@ def render_webrtc_connection_status(
         st.warning(
             "TURN relay is not configured, so WebRTC is not the default. It may "
             "fail on mobile carriers, school Wi-Fi, or symmetric NAT. The "
-            "snapshot fallback still works but is not real-time."
+            "recommended fallback keeps a smooth browser-local preview while "
+            "the AI overlay updates from snapshots."
         )
 
 
@@ -444,8 +471,9 @@ with st.sidebar:
         index=0 if turn_enabled else 1,
         help=(
             "WebRTC is the only continuous real-time path and becomes the "
-            "default when a TURN relay is configured. The snapshot fallback "
-            "uses compressed JPEG request/response frames and is not smooth video."
+            "default when a TURN relay is configured. The recommended fallback "
+            "keeps a smooth local preview while compressed snapshots update its "
+            "AI overlay."
         ),
     )
     camera_facing_label = st.selectbox(
@@ -553,10 +581,10 @@ monitor = get_monitor(detector, monitor_key, float(cooldown_seconds))
 active_webrtc_context = None
 
 if camera_mode == SNAPSHOT_CAMERA_MODE:
-    st.subheader("Low-bandwidth snapshot fallback")
-    st.warning(
-        "This mode sends individual camera snapshots through Streamlit. It is "
-        "near-real-time monitoring, not continuous or smooth video."
+    st.subheader("Smooth local camera + AI snapshots")
+    st.success(
+        "The camera preview stays live in your browser. AI overlays update from "
+        "compressed snapshots without replacing or flickering the video."
     )
     st.caption(
         f"Compressed {CLOUD_CAMERA_WIDTH}×{CLOUD_CAMERA_HEIGHT} JPEG snapshots, "
@@ -569,6 +597,7 @@ if camera_mode == SNAPSHOT_CAMERA_MODE:
     )
 
     if cloud_camera_active:
+        overlay_snapshot = monitor.snapshot()
         camera_acknowledgement = (
             st.session_state.get("camera_acknowledgement", 0) + 1
         )
@@ -580,10 +609,12 @@ if camera_mode == SNAPSHOT_CAMERA_MODE:
             jpeg_quality=CLOUD_CAMERA_JPEG_QUALITY,
             facing_mode=camera_facing_mode,
             acknowledgement=camera_acknowledgement,
+            overlay=build_camera_overlay(overlay_snapshot),
+            overlay_revision=overlay_snapshot.processed_frames,
             key=f"safepath-cloud-camera-{camera_facing_mode}",
         )
         if capture is None or capture.status == "starting":
-            st.info("Starting the camera. Choose **Allow** if prompted.")
+            st.caption("Opening the live camera preview…")
         elif capture.status == "error":
             st.error(f"Camera error: {capture.error}")
         else:
@@ -601,24 +632,11 @@ if camera_mode == SNAPSHOT_CAMERA_MODE:
                     frame_digest, frame = decode_camera_frame(capture.image)
                     frame_key = (id(monitor), frame_digest)
                     if st.session_state.get("cloud_frame_key") != frame_key:
-                        st.session_state.cloud_annotated_frame = (
-                            monitor.process_image(frame)
-                        )
+                        monitor.process_image(frame)
                         st.session_state.cloud_frame_key = frame_key
-
-                    annotated_frame = st.session_state.get(
-                        "cloud_annotated_frame"
+                    monitor.record_snapshot_roundtrip(
+                        capture.captured_at_epoch_ms
                     )
-                    if annotated_frame is not None:
-                        st.image(
-                            annotated_frame,
-                            channels="BGR",
-                            caption="Latest near-real-time AI snapshot",
-                            use_container_width=True,
-                        )
-                        monitor.record_snapshot_roundtrip(
-                            capture.captured_at_epoch_ms
-                        )
                 except Exception as error:
                     st.error(f"Could not process the browser frame: {error}")
     else:

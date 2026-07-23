@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import base64
 import math
+from collections.abc import Mapping
 from dataclasses import dataclass
 from io import BytesIO
 from pathlib import Path
@@ -38,9 +39,11 @@ def camera_capture(
     jpeg_quality: float = 0.68,
     facing_mode: str = "environment",
     acknowledgement: int = 0,
+    overlay: Mapping[str, object] | None = None,
+    overlay_revision: int = 0,
     key: str | None = None,
 ) -> CameraCapture | None:
-    """Capture back-pressured JPEG frames using the requested phone camera."""
+    """Show a live local preview and capture back-pressured JPEG frames."""
 
     value = _camera_component(
         intervalMs=max(200, int(interval_ms)),
@@ -51,6 +54,8 @@ def camera_capture(
             "environment" if facing_mode == "environment" else "user"
         ),
         acknowledgement=int(acknowledgement),
+        overlay=dict(overlay) if overlay else None,
+        overlayRevision=max(0, int(overlay_revision)),
         key=key,
         default=None,
     )
