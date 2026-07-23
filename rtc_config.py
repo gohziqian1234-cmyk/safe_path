@@ -1,168 +1,55 @@
-"""WebRTC ICE configuration with optional secret-backed TURN credentials."""
+"""WebRTC network configuration for local and cloud SafePath sessions."""
 
 from __future__ import annotations
 
 import base64
-import json
-from collections.abc import Callable, Mapping, Sequence
-from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+import hashlib
+import hmac
+import time
 
 
-DEFAULT_STUN_URLS = (
-    "stun:stun.l.google.com:19302",
-    "stun:stun1.l.google.com:19302",
-)
-TWILIO_TOKEN_TTL_SECONDS = 3600
+PUBLIC_TURN_HOST = "staticauth.openrelay.metered.ca"
+PUBLIC_TURN_SECRET = "openrelayprojectsecret"
+TURN_CREDENTIAL_LIFETIME_SECONDS = 24 * 60 * 60
 
 
-def _normalize_urls(value: object) -> list[str]:
-    if isinstance(value, str):
-        return [value] if value.strip() else []
-    if isinstance(value, Sequence):
-        return [str(item).strip() for item in value if str(item).strip()]
-    return []
+def create_temporary_turn_credentials(
+    *,
+    now: float | None = None,
+    lifetime_seconds: int = TURN_CREDENTIAL_LIFETIME_SECONDS,
+    user_id: str = "safepath",
+) -> tuple[str, str]:
+    """Create coturn REST credentials for Metered's public static-auth relay."""
+
+    issued_at = time.time() if now is None else float(now)
+    expires_at = int(issued_at + max(60, int(lifetime_seconds)))
+    username = f"{expires_at}:{user_id}"
+    digest = hmac.new(
+        PUBLIC_TURN_SECRET.encode("utf-8"),
+        username.encode("utf-8"),
+        hashlib.sha1,
+    ).digest()
+    credential = base64.b64encode(digest).decode("ascii")
+    return username, credential
 
 
-def _normalize_ice_server(server: object) -> dict[str, object] | None:
-    if isinstance(server, Mapping):
-        urls = _normalize_urls(server.get("urls") or server.get("url"))
-        username = str(server.get("username") or "").strip()
-        credential = str(server.get("credential") or "").strip()
-    else:
-        urls = _normalize_urls(getattr(server, "urls", None))
-        username = str(getattr(server, "username", "") or "").strip()
-        credential = str(getattr(server, "credential", "") or "").strip()
+def build_rtc_configuration(*, now: float | None = None) -> dict[str, object]:
+    """Return STUN plus TURN routes suitable for Streamlit Community Cloud."""
 
-    if not urls:
-        return None
-    normalized: dict[str, object] = {"urls": urls}
-    if username:
-        normalized["username"] = username
-    if credential:
-        normalized["credential"] = credential
-    return normalized
-
-
-def build_rtc_configuration(
-    turn_settings: Mapping[str, object] | None = None,
-    additional_ice_servers: Sequence[object] | None = None,
-) -> dict[str, object]:
-    """Build STUN plus static or short-lived TURN relay configuration."""
-
-    ice_servers: list[dict[str, object]] = [
-        {"urls": list(DEFAULT_STUN_URLS)},
-    ]
-
-    if turn_settings:
-        urls = _normalize_urls(turn_settings.get("urls"))
-        username = str(turn_settings.get("username") or "").strip()
-        credential = str(turn_settings.get("credential") or "").strip()
-        supplied_values = bool(urls or username or credential)
-        complete = bool(urls and username and credential)
-        if supplied_values and not complete:
-            raise ValueError(
-                "TURN secrets require urls, username, and credential."
-            )
-        if complete:
-            ice_servers.append(
-                {
-                    "urls": urls,
-                    "username": username,
-                    "credential": credential,
-                }
-            )
-
-    for server in additional_ice_servers or ():
-        normalized = _normalize_ice_server(server)
-        if normalized and normalized not in ice_servers:
-            ice_servers.append(normalized)
-
+    username, credential = create_temporary_turn_credentials(now=now)
     return {
-        "iceServers": ice_servers,
+        "iceServers": [
+            {"urls": ["stun:stun.l.google.com:19302"]},
+            {
+                "urls": [
+                    f"turn:{PUBLIC_TURN_HOST}:80",
+                    f"turn:{PUBLIC_TURN_HOST}:443",
+                    f"turn:{PUBLIC_TURN_HOST}:443?transport=tcp",
+                    f"turns:{PUBLIC_TURN_HOST}:443?transport=tcp",
+                ],
+                "username": username,
+                "credential": credential,
+            },
+        ],
         "iceCandidatePoolSize": 10,
     }
-
-
-def has_turn_relay(configuration: Mapping[str, object]) -> bool:
-    """Return whether an ICE configuration contains a TURN/TURNS URL."""
-
-    for server in configuration.get("iceServers", []):
-        if not isinstance(server, Mapping):
-            continue
-        for url in _normalize_urls(server.get("urls") or server.get("url")):
-            if url.startswith(("turn:", "turns:")):
-                return True
-    return False
-
-
-def ice_url_schemes(configuration: Mapping[str, object]) -> tuple[str, ...]:
-    """Return the configured ICE URI schemes without exposing credentials."""
-
-    schemes: set[str] = set()
-    for server in configuration.get("iceServers", []):
-        normalized = _normalize_ice_server(server)
-        if normalized is None:
-            continue
-        for url in _normalize_urls(normalized["urls"]):
-            scheme, separator, _rest = url.partition(":")
-            if separator:
-                schemes.add(scheme.casefold())
-    return tuple(sorted(schemes))
-
-
-def fetch_twilio_ice_servers(
-    account_sid: str,
-    auth_token: str,
-    *,
-    ttl_seconds: int = TWILIO_TOKEN_TTL_SECONDS,
-    timeout_seconds: float = 10.0,
-    opener: Callable[..., object] = urlopen,
-) -> list[dict[str, object]]:
-    """Request short-lived STUN/TURN credentials from Twilio server-side."""
-
-    account_sid = account_sid.strip()
-    auth_token = auth_token.strip()
-    if not account_sid or not auth_token:
-        raise ValueError("Twilio secrets require account_sid and auth_token.")
-
-    endpoint = (
-        "https://api.twilio.com/2010-04-01/Accounts/"
-        f"{account_sid}/Tokens.json"
-    )
-    basic_token = base64.b64encode(
-        f"{account_sid}:{auth_token}".encode("utf-8")
-    ).decode("ascii")
-    request = Request(
-        endpoint,
-        data=urlencode(
-            {"Ttl": max(60, min(86400, int(ttl_seconds)))}
-        ).encode("ascii"),
-        headers={
-            "Authorization": f"Basic {basic_token}",
-            "Content-Type": "application/x-www-form-urlencoded",
-            "User-Agent": "SafePath-AI/1.0",
-        },
-        method="POST",
-    )
-
-    try:
-        with opener(request, timeout=timeout_seconds) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as error:
-        raise RuntimeError(
-            "Twilio could not issue temporary TURN credentials."
-        ) from error
-
-    raw_servers = payload.get("ice_servers")
-    if not isinstance(raw_servers, list):
-        raise RuntimeError("Twilio returned no ICE server list.")
-
-    servers = [
-        normalized
-        for item in raw_servers
-        if (normalized := _normalize_ice_server(item)) is not None
-    ]
-    if not has_turn_relay({"iceServers": servers}):
-        raise RuntimeError("Twilio returned no TURN relay URLs.")
-    return servers

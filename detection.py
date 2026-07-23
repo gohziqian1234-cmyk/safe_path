@@ -6,87 +6,11 @@ import argparse
 import os
 import threading
 from pathlib import Path
-from typing import Callable, Iterable, Protocol
+from typing import Iterable
 
-from camera_feed import resize_for_inference
 from event_store import EventStore
 from risk_engine import DEFAULT_HAZARD_LABELS, Detection, RiskAssessment, RiskEngine
 from voice_alert import VoiceAlert
-
-
-def configure_runtime_directories() -> None:
-    """Keep third-party caches inside the project on desktop and cloud."""
-
-    config_directory = Path(__file__).parent / "outputs" / ".ultralytics"
-    config_directory.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("YOLO_CONFIG_DIR", str(config_directory))
-    matplotlib_directory = Path(__file__).parent / "outputs" / ".matplotlib"
-    matplotlib_directory.mkdir(parents=True, exist_ok=True)
-    os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_directory))
-
-
-class PredictionRuntime(Protocol):
-    model: object
-    inference_size: int
-
-    def predict(self, source, *, classes: list[int], confidence: float): ...
-
-
-class ModelRuntime:
-    """One persisted, warmed YOLO model plus its shared inference lock."""
-
-    def __init__(
-        self,
-        model_path: str,
-        inference_size: int = 416,
-        *,
-        warm_up: bool = True,
-        model_factory: Callable[[str], object] | None = None,
-    ) -> None:
-        configure_runtime_directories()
-        if model_factory is None:
-            from ultralytics import YOLO
-
-            model_factory = YOLO
-
-        self.model_path = model_path
-        self.inference_size = max(160, int(inference_size))
-        self.model = model_factory(model_path)
-        self._prediction_lock = threading.Lock()
-        self.warmed_up = False
-        if warm_up:
-            self.warm_up()
-
-    def warm_up(self) -> None:
-        """Pay the one-time PyTorch setup cost before the first camera frame."""
-
-        import numpy as np
-
-        sample = np.zeros(
-            (self.inference_size, self.inference_size, 3),
-            dtype=np.uint8,
-        )
-        with self._prediction_lock:
-            self.model.predict(
-                source=sample,
-                imgsz=self.inference_size,
-                device="cpu",
-                verbose=False,
-            )
-        self.warmed_up = True
-
-    def predict(self, source, *, classes: list[int], confidence: float):
-        """Run one serialized CPU inference using the configured image size."""
-
-        with self._prediction_lock:
-            return self.model.predict(
-                source=source,
-                classes=classes,
-                conf=confidence,
-                imgsz=self.inference_size,
-                device="cpu",
-                verbose=False,
-            )
 
 
 class LocalDetector:
@@ -97,20 +21,23 @@ class LocalDetector:
         model_path: str = "yolo11n.pt",
         confidence: float = 0.40,
         hazard_labels: Iterable[str] = DEFAULT_HAZARD_LABELS,
-        inference_size: int = 416,
-        model_runtime: PredictionRuntime | None = None,
     ) -> None:
-        configure_runtime_directories()
+        # Keep Ultralytics settings inside the project instead of writing to
+        # the user's roaming AppData directory.
+        config_directory = Path(__file__).parent / "outputs" / ".ultralytics"
+        config_directory.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("YOLO_CONFIG_DIR", str(config_directory))
+        matplotlib_directory = Path(__file__).parent / "outputs" / ".matplotlib"
+        matplotlib_directory.mkdir(parents=True, exist_ok=True)
+        os.environ.setdefault("MPLCONFIGDIR", str(matplotlib_directory))
+
+        from ultralytics import YOLO
 
         self.model_path = model_path
         self.confidence = confidence
         self.risk_engine = RiskEngine(hazard_labels)
-        self.runtime = model_runtime or ModelRuntime(
-            model_path=model_path,
-            inference_size=inference_size,
-        )
-        self.model = self.runtime.model
-        self.inference_size = self.runtime.inference_size
+        self.model = YOLO(model_path)
+        self._prediction_lock = threading.Lock()
         self.target_class_ids = self._find_target_class_ids()
 
         if not self.target_class_ids:
@@ -133,20 +60,16 @@ class LocalDetector:
     def process_frame(self, frame):
         """Return the annotated frame and its structured risk assessment."""
 
-        inference_frame, x_scale, y_scale = resize_for_inference(
-            frame,
-            self.inference_size,
-        )
-        results = self.runtime.predict(
-            inference_frame,
-            classes=self.target_class_ids,
-            confidence=self.confidence,
-        )
-        detections = self._parse_detections(
-            results[0],
-            x_scale=x_scale,
-            y_scale=y_scale,
-        )
+        # Streamlit caches this model across sessions. Serialize inference so
+        # simultaneous browser streams do not mutate the same YOLO object.
+        with self._prediction_lock:
+            results = self.model.predict(
+                source=frame,
+                classes=self.target_class_ids,
+                conf=self.confidence,
+                verbose=False,
+            )
+        detections = self._parse_detections(results[0])
         frame_height, frame_width = frame.shape[:2]
         assessment = self.risk_engine.assess(
             detections,
@@ -156,13 +79,7 @@ class LocalDetector:
         annotated = annotate_frame(frame, assessment)
         return annotated, assessment
 
-    def _parse_detections(
-        self,
-        result,
-        *,
-        x_scale: float = 1.0,
-        y_scale: float = 1.0,
-    ) -> list[Detection]:
+    def _parse_detections(self, result) -> list[Detection]:
         if result.boxes is None:
             return []
 
@@ -178,12 +95,7 @@ class LocalDetector:
                 Detection(
                     label=str(label),
                     confidence=float(confidence),
-                    box=(
-                        float(box[0]) * x_scale,
-                        float(box[1]) * y_scale,
-                        float(box[2]) * x_scale,
-                        float(box[3]) * y_scale,
-                    ),
+                    box=tuple(float(value) for value in box),
                 )
             )
         return detections
@@ -278,17 +190,12 @@ def run_camera(
     confidence: float = 0.40,
     voice_enabled: bool = True,
     cooldown_seconds: float = 8.0,
-    inference_size: int = 640,
 ) -> None:
     """Run SafePath in a normal OpenCV desktop window."""
 
     import cv2
 
-    detector = LocalDetector(
-        model_path,
-        confidence,
-        inference_size=inference_size,
-    )
+    detector = LocalDetector(model_path, confidence)
     camera = open_camera(camera_index)
     alerts = VoiceAlert(cooldown_seconds=cooldown_seconds, enabled=voice_enabled)
     events = EventStore(Path(__file__).parent / "outputs")
@@ -321,12 +228,6 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--camera", type=int, default=0, help="Webcam index")
     parser.add_argument("--model", default="yolo11n.pt", help="YOLO weights file")
     parser.add_argument("--confidence", type=float, default=0.40)
-    parser.add_argument(
-        "--imgsz",
-        type=int,
-        default=640,
-        help="YOLO inference size; desktop default stays at 640 for accuracy.",
-    )
     parser.add_argument("--cooldown", type=float, default=8.0)
     parser.add_argument("--no-voice", action="store_true")
     return parser.parse_args()
@@ -340,5 +241,4 @@ if __name__ == "__main__":
         confidence=arguments.confidence,
         voice_enabled=not arguments.no_voice,
         cooldown_seconds=arguments.cooldown,
-        inference_size=arguments.imgsz,
     )
