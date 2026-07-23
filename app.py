@@ -399,12 +399,17 @@ if camera_mode == CAMERA_MODES[0]:
     )
 
     if cloud_camera_active:
+        camera_acknowledgement = (
+            st.session_state.get("camera_acknowledgement", 0) + 1
+        )
+        st.session_state.camera_acknowledgement = camera_acknowledgement
         capture = camera_capture(
             interval_ms=CLOUD_CAMERA_INTERVAL_MS,
             width=CLOUD_CAMERA_WIDTH,
             height=CLOUD_CAMERA_HEIGHT,
             jpeg_quality=CLOUD_CAMERA_JPEG_QUALITY,
             facing_mode=camera_facing_mode,
+            acknowledgement=camera_acknowledgement,
             key=f"safepath-cloud-camera-{camera_facing_mode}",
         )
         if capture is None or capture.status == "starting":

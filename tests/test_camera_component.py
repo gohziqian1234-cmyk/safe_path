@@ -23,6 +23,7 @@ class CameraComponentTests(unittest.TestCase):
     def test_uses_compressed_jpeg_and_server_backpressure(self):
         self.assertIn('toDataURL("image/jpeg"', self.source)
         self.assertIn("waitingForServer", self.source)
+        self.assertIn("event.detail.args", self.source)
 
 
 if __name__ == "__main__":

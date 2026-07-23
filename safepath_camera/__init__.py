@@ -35,6 +35,7 @@ def camera_capture(
     height: int = 480,
     jpeg_quality: float = 0.68,
     facing_mode: str = "environment",
+    acknowledgement: int = 0,
     key: str | None = None,
 ) -> CameraCapture | None:
     """Capture back-pressured JPEG frames using the requested phone camera."""
@@ -47,6 +48,7 @@ def camera_capture(
         facingMode=(
             "environment" if facing_mode == "environment" else "user"
         ),
+        acknowledgement=int(acknowledgement),
         key=key,
         default=None,
     )
