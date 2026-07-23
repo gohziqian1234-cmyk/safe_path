@@ -62,6 +62,15 @@ YOLO11n/416 frames in a steady 10-second window (about 2 FPS) with 43 ms average
 AI inference. The remaining cadence is Streamlit rerun/transport overhead, not
 model inference; backpressure intentionally favors current frames over a queue.
 
+After the WebRTC architecture change, a deployed YOLO11n/320 run measured 130
+incoming callback frames, 23 analyzed frames, and 107 intentionally dropped
+analysis frames. The current-frame callback took 4 ms; the last inference took
+38 ms, average inference was 64 ms, capture-to-result was 40 ms, and the outgoing
+annotation was 61 ms old. This demonstrates that slow analysis no longer queues
+or freezes the video path. The STUN-only session connected and later returned to
+Ready, so it is not evidence of restrictive-network reliability; a real TURN
+credential and a phone-on-cellular check are still required.
+
 ## Run locally on Windows
 
 Python 3.11 or newer is recommended:
